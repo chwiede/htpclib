@@ -5,7 +5,14 @@ import re
 from pprint import pprint
 from subprocess import Popen, PIPE
 
+
 def shell_execute(command):
+    """
+    Executes a shell command and returns its exit code.
+    
+    @type command: string
+    @param command: The command to execute    
+    """
     #command_args = shlex.split(command)
     process = Popen(command, shell=True, stdout=PIPE)
     output, error = process.communicate()
@@ -15,6 +22,9 @@ def shell_execute(command):
 
 
 def xrandr_query():
+    """
+    Returns all current available screen resolutions and refresh rate modes as a dictionary.
+    """
     pattern_screens = r'(\w+)\s+connected\s+(primary|)?.+\n(\s+[x*+.\d\s]+\n)'
     pattern_mode = r'^\s+(\d+)x(\d+)\s+([\d.]+)([*+]?)'
 
@@ -34,7 +44,7 @@ def xrandr_query():
                 modes.append({'width': match.group(1),
                               'height': match.group(2),
                               'rate': match.group(3),
-                              'current': '*' in match.group(4),
+                              'active': '*' in match.group(4),
                               'preferred': '+' in match.group(4)})
         
         item = {'name': screen[0],
@@ -43,7 +53,3 @@ def xrandr_query():
         
         yield item
 
-        
-
-for blub in xrandr_query():
-    pprint(blub)                           
