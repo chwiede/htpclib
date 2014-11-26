@@ -4,6 +4,7 @@ import re
 import select
 import socket
 import time
+import psutil
 from subprocess import Popen, PIPE
 
 
@@ -56,20 +57,25 @@ def xrandr_query():
 
 
 def xrandr_current():
-    for mode in xrandr_query():
-        if mode['active']:
-            return mode
+    for screen in xrandr_query():
+
+        if not screen['primary']:
+            continue
+
+        for mode in screen['modes']:
+            if mode['active']:
+                return mode
 
     return None
 
 
 def create_acpi_socket(connect=True):
-    acpi_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    result = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
     if connect:
-        acpi_socket.connect('/var/run/acpid.socket')
+        result.connect('/var/run/acpid.socket')
 
-    return acpi_socket
+    return result
 
 
 def check_for_powerbutton(acpi_socket, timeout=0.1):
@@ -84,18 +90,107 @@ def check_for_powerbutton(acpi_socket, timeout=0.1):
     return False
 
 
+def poll_screen_change(last_result, skip=5):
+    if last_result is None:
+        return {'changed': False,
+                'count': 0,
+                'mode': xrandr_current()}
+
+    last_result['count'] += 1
+
+    if last_result['count'] >= skip:
+        last_result['count'] = 0
+        new_setting = xrandr_current()
+        last_result['changed'] = last_result['mode'] != new_setting
+        last_result['mode'] = new_setting
+
+    return last_result
+
+
+def get_record_pending(client):
+    active_records = list(tvhclib.get_active_records(client))
+
+    if active_records:
+        return True
+
+    next_record = tvhclib.get_next_record(client)
+    if next_record is not None:
+        time_to_next = time.time() - next_record['start']
+        return (time_to_next / 60.0) < 45
+
+    return False
+
+
+def kill_process_recursive(pid):
+    parent = psutil.Process(pid)
+
+    for child in parent.children(recursive=True):
+        child.kill()
+
+    parent.kill()
+
+
 if __name__ == '__main__':
     from tvhc import tvhclib
+    from tvhc import HtspClient
 
     WAKE_PERSISTENT_FILE = '/var/tmp/tvhc_wakeup'
+    CMD_GUI_LOAD = "xbmc"
+    CMD_GUI_STOP = "kill xbmc.bin"
 
     # check if started for record mode
-    waked_for_record = tvhclib.get_wakedup(WAKE_PERSISTENT_FILE)
+    shutdown = False
+    gui_process = None
+    gui_running = False
+    gui_needed = not tvhclib.get_wakedup(WAKE_PERSISTENT_FILE)
+    screen_state = None
 
+    # create acpi_socket for power button detection
     acpi_socket = create_acpi_socket()
 
-    while 1:
-        time.sleep(1)
-        if check_for_powerbutton(acpi_socket):
-            print("powerbtn")
+    # connect client
+    with HtspClient() as client:
+        if not client.try_open('localhost', 9982):
+            tvhclib.open_fail(True)
 
+        # enter main loop
+        while 1:
+            # power button pressed? change mode, or shutdown.
+            if check_for_powerbutton(acpi_socket):
+                # toggle gui mode
+                gui_needed = not gui_needed
+
+                # record active or pending?
+                record_pending = get_record_pending(client)
+
+                # decide if shutdown is allowed....
+                shutdown = not gui_needed and not record_pending
+
+            # start gui, if watch mode
+            if gui_needed and not gui_running:
+                gui_process = Popen(CMD_GUI_LOAD, shell=True, stdout=PIPE)
+                gui_running = True
+
+            # stop gui, if not needed anymore
+            if gui_running and not gui_needed:
+                if gui_process is not None:
+                    kill_process_recursive(gui_process.pid)
+
+                gui_running = False
+
+            # gui exited?
+            if gui_process is not None and gui_process.poll() is not None:
+                gui_running = False
+
+            # poll screen state
+            screen_state = poll_screen_change(screen_state)
+            if screen_state['changed']:
+                pass
+
+            # shutdown?
+            if shutdown:
+                print("SHUTDOWN!")
+                break
+
+            # just wait a second...
+            time.sleep(1)
