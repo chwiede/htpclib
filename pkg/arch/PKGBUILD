@@ -1,0 +1,44 @@
+# Maintainer: Christoph Wiedemann <chwiede@gmail.com>
+pkgname=htpclib
+pkgver=0.1
+pkgrel=1
+pkgdesc="XBMC/KODI start stop helper scripts."
+arch=('i686' 'x86_64')
+url="https://github.com/chwiede/htpclib"
+license=('MIT')
+groups=()
+depends=('python' 'python-psutil' 'xbmc')
+makedepends=()
+provides=()
+conflicts=()
+replaces=()
+backup=()
+options=(!emptydirs)
+install=
+source=()
+md5sums=()
+
+package() {
+  gittarget="$srcdir/$pkgname-$pkgver"
+
+  if [[ -d "$gittarget" ]]; then
+    cd "$gittarget" && git pull origin
+  else
+  	git clone "$url" "$gittarget"
+  fi
+
+  # go to source directory
+  cd "$srcdir/$pkgname-$pkgver/src"
+
+  # copy files
+  mkdir -p $pkgdir/usr/share/htpclib
+  mkdir -p $pkgdir/etc/htpc
+  cp htpcgui.py $pkgdir/usr/share/htpclib/
+  cp htpcgui.conf $pkgdir/etc/htpc/
+
+}
+
+pkgver() {
+  cd "$pkgname"
+  git describe --long | sed -r 's/([^-]*-g)/r\1/;s/-/./g'
+}

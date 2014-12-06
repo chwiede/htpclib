@@ -60,3 +60,7 @@ target/
 .project
 .pydevproject
 
+# Arch linux package stuff
+pkg/arch/*.xz
+pkg/arch/pkg
+pkg/arch/src

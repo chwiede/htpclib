@@ -6,6 +6,7 @@ import socket
 import time
 import psutil
 import logging
+import configparser
 import sys
 from subprocess import Popen, PIPE
 
@@ -133,14 +134,24 @@ def kill_process_recursive(pid):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
     logging.info('Starting HTPC UI Controller')
     from tvhc import tvhclib
     from tvhc import HtspClient
 
+    # load settings
+    config = configparser.ConfigParser()
+    config.read(['/etc/htpc/htpcgui.conf'])
+
     logging.info('Loading config')
-    WAKE_PERSISTENT_FILE = '/var/tmp/tvhc_wakeup'
-    CMD_GUI_LOAD = 'xbmc'
-    CMD_GUI_STOP = 'kill xbmc.bin'
+    try:
+        WAKE_PERSISTENT_FILE = config.get('Paths', 'wake_persistent')
+        CMD_GUI_LOAD = config.get('Commands', 'gui_load')
+        CMD_GUI_STOP = config.get('Commands', 'gui_stop')
+        CMD_SHUTDOWN = config.get('Commands', 'shutdown')
+    except:
+        logging.error('Could not load configuration. Please provide /etc/htpc/htpcgui.conf.')
+        sys.exit()
 
     # check if started for record mode
     logging.info('Initialize... ')
@@ -179,15 +190,18 @@ if __name__ == '__main__':
 
             # start gui, if watch mode
             if gui_needed and not gui_running:
-                logging.info('Start GUI...')
+                logging.info('Start GUI via command "%s"' % CMD_GUI_LOAD)
                 gui_process = Popen(CMD_GUI_LOAD, shell=True, stdout=PIPE)
                 gui_running = True
                 logging.info('GUI running with PID %s' % gui_process.pid)
 
             # stop gui, if not needed anymore
             if gui_running and not gui_needed:
-                logging.info('Stop GUI...')
-                if gui_process is not None:
+                if CMD_GUI_STOP:
+                    logging.info('Stopping GUI via command "%s"' % CMD_GUI_STOP)
+                    shell_execute(CMD_GUI_STOP)
+                elif gui_process is not None:
+                    logging.info('Stopping GUI kill-signal')
                     kill_process_recursive(gui_process.pid)
                     gui_process = None
                     logging.info('GUI and child processes stopped.')
@@ -209,6 +223,7 @@ if __name__ == '__main__':
             # shutdown?
             if shutdown:
                 logging.info('Shutdown now...')
+                shell_execute(CMD_SHUTDOWN)
                 break
 
             # just wait a second...
