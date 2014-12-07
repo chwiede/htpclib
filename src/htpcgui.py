@@ -185,14 +185,17 @@ def get_record_pending(settings, client=None):
     if client is None:
         with get_open_htsp_client() as client:
             active_records = list(tvhclib.get_active_records(client))
+            next_record = tvhclib.get_next_record(client)
     else:
         active_records = list(tvhclib.get_active_records(client))
+        next_record = tvhclib.get_next_record(client)
 
     if active_records:
+        logging.debug('active records found.')
         return True
 
-    next_record = tvhclib.get_next_record(client)
     if next_record is not None:
+        logging.debug('next record starting at %s, time is %s' % (next_record['start'], time.time()))
         time_to_next = next_record['start'] - time.time()
         return time_to_next < settings['rec_bridge']
 
