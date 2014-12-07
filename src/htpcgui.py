@@ -40,7 +40,7 @@ def setup_logging():
     logfile = os.path.join(os.path.expanduser('~'), 'htpcgui.log')
     logging.basicConfig(
         filename=logfile,
-        filemode='w',
+        filemode='a',
         level=logging.DEBUG,
         format='%(asctime)s.%(msecs)d %(levelname)s  %(funcName)s: %(message)s',
         datefmt="%Y-%m-%d %H:%M:%S")
@@ -178,6 +178,8 @@ def get_record_pending(settings, client=None):
         time_to_next = next_record['start'] - time.time()
         return time_to_next < settings['rec_bridge']
 
+    return False
+
 
 def get_screen_mode(mode):
     if mode is None:
@@ -214,7 +216,7 @@ class HtpcGui(object):
         self.screen_mode = current_screen_mode()
         self.gui_needed = False
         self.gui_process = None
-        self.recording = False
+        self.stay_running = False
         self.last_record_check = 0
         self.last_screen_check = 0
 
@@ -271,7 +273,8 @@ class HtpcGui(object):
         """
         logging.debug('Entering main loop.')
         self.gui_needed = get_gui_initial(self.settings)
-        while self.gui_needed or self.recording:
+        self.stay_running = True
+        while self.gui_needed or self.stay_running:
             # just a moment...
             time.sleep(1)
 
@@ -300,8 +303,8 @@ class HtpcGui(object):
                 time_diff = time.time() - self.last_record_check
                 if time_diff > self.settings['rec_checking']:
                     self.last_record_check = time.time()
-                    self.recording = get_record_pending(self.settings)
-                    logging.debug('check for pending records: %s' % self.recording)
+                    self.stay_running = get_record_pending(self.settings)
+                    logging.debug('check for pending records: %s' % self.stay_running)
 
         logging.debug('htpc gui main loop finished.')
 
