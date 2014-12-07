@@ -56,7 +56,7 @@ def xrandr_query():
     pattern_mode = r'^\s+(\d+)x(\d+)\s+([\d.]+)([ *+]{0,2})'
 
     # xrandr query command
-    command = "xrandr -q"
+    command = "xrandr --current"
     output, error, exc = shell_execute(command)
 
     # find screens
@@ -229,6 +229,7 @@ class HtpcGui(object):
                          'gui_load': cp.get('Commands', 'gui_load'),
                          'gui_stop': cp.get('Commands', 'gui_stop'),
                          'shutdown': cp.get('Commands', 'shutdown'),
+                         'setup_display': cp.get('Commands', 'setup_display'),
                          'rec_bridge': int(cp.get('Times', 'rec_bridge')),
                          'xrandr_wait': int(cp.get('Times', 'xrandr_wait')),
                          'rec_checking': int(cp.get('Times', 'rec_checking')),
@@ -304,34 +305,50 @@ class HtpcGui(object):
 
         logging.debug('htpc gui main loop finished.')
 
+    def create_setup_display_command(self):
+        mode = xrandr_preferred()
+        if mode is None:
+            logging.warning('Could not get preferred screen mode!')
+            return None
+        else:
+            preferred = get_screen_mode(mode)
+            return 'xrandr --output %s -s %s' % (preferred['port'], preferred['resolution'])
+
     def activate_preferred_resolution(self):
         """
         stops gui, activates the preferred resolutions, and restarts gui
         :return: void
         """
 
-        mode = xrandr_preferred()
-        if mode is None:
-            logging.warning('Could not get preferred screen mode!')
-            return
+        # create xrandr command
+        if self.settings['setup_display']:
+            cmd = self.settings['setup_display']
+        else:
+            cmd = self.create_setup_display_command()
 
-        preferred = get_screen_mode(mode)
-
+        # stop gui, if running
         has_stopped = False
         if self.get_gui_running():
             has_stopped = True
             self.stop_gui()
+            time.sleep(self.settings['xrandr_wait'])
 
-        time.sleep(self.settings['xrandr_wait'])
-        cmd = 'xrandr --output %s -s %s' % (preferred['port'], preferred['resolution'])
-        shell_execute(cmd)
-        time.sleep(self.settings['xrandr_wait'])
+        # setup screen
+        logging.debug('setup screen with cmd: %s' % cmd)
+        output, error, exitcode = shell_execute(cmd)
+        if exitcode != 0:
+            logging.warning('setup screen not successfull! Exit code: %s' % exitcode)
+            logging.warning(output)
+            logging.warning(error)
 
+        # restart gui, if it was stopped.
         if has_stopped:
+            time.sleep(self.settings['xrandr_wait'])
             self.start_gui()
 
+        # save new screen mode. no change should be detected after this method.
         self.screen_mode = current_screen_mode()
-        logging.debug('screen was set to %s on %s' % (self.screen_mode['resolution'],
+        logging.debug('resolution is now %s on %s' % (self.screen_mode['resolution'],
                                                       self.screen_mode['port']))
 
     def start_gui(self):
