@@ -41,10 +41,14 @@ def setup_logging():
     logging.basicConfig(
         filename=logfile,
         filemode='a',
+        maxBytes=1*1024*1024,
+        backupCount=5,
         level=logging.DEBUG,
         format='%(asctime)s.%(msecs)d %(levelname)s  %(funcName)s: %(message)s',
         datefmt="%Y-%m-%d %H:%M:%S")
+    logging.info('***')
     logging.info('*** Starting HTPC UI Controller ***')
+    logging.info('***')
 
 
 def xrandr_query():
