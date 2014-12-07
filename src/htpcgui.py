@@ -1,31 +1,49 @@
 #!/usr/bin/env python
-
+import configparser
+import logging
+import os
 import re
 import select
 import socket
 import time
 import psutil
-import logging
-import configparser
-import sys
-import os
 from subprocess import Popen, PIPE
-from tvhc import tvhclib
-from tvhc import HtspClient
 
 
 def shell_execute(command):
     """
     Executes a shell command and returns its exit code.
-    
+
     @type command: string
-    @param command: The command to execute    
+    @param command: The command to execute
     """
     process = Popen(command, shell=True, stdout=PIPE)
     output, error = process.communicate()
     exitcode = process.wait()
 
     return output.decode('utf8'), error, exitcode
+
+
+def kill_process_recursive(pid):
+    parent = psutil.Process(pid)
+    for child in parent.children(recursive=True):
+        child.kill()
+    parent.kill()
+
+
+def setup_logging():
+    """
+    setups logging
+    :return: void
+    """
+    logfile = os.path.join(os.path.expanduser('~'), 'htpcgui.log')
+    logging.basicConfig(
+        filename=logfile,
+        filemode='w',
+        level=logging.DEBUG,
+        format='%(asctime)s.%(msecs)d %(levelname)s  %(funcName)s: %(message)s',
+        datefmt="%Y-%m-%d %H:%M:%S")
+    logging.info('*** Starting HTPC UI Controller ***')
 
 
 def xrandr_query():
@@ -63,6 +81,10 @@ def xrandr_query():
 
 
 def xrandr_current():
+    """
+    Gets the current xrandr setting
+    :return: dictionary with xrandr setting
+    """
     for screen in xrandr_query():
 
         if not screen['primary']:
@@ -75,7 +97,20 @@ def xrandr_current():
     return None
 
 
+def xrandr_resolution(mode):
+    """
+    Gets the resolution of a xrandr mode (i.e.: "1920x1080")
+    :param mode: a xrandr mode dictionary
+    :return: string
+    """
+    return '%sx%s' % (mode['width'], mode['height'])
+
+
 def xrandr_preferred():
+    """
+    Gets the preferred xrandr ode
+    :return: dictionary with xrandr setting
+    """
     for screen in xrandr_query():
 
         if not screen['primary']:
@@ -89,6 +124,11 @@ def xrandr_preferred():
 
 
 def create_acpi_socket(connect=True):
+    """
+    Creates an acpi socket
+    :param connect: if True, socket will be connected
+    :return: socket
+    """
     result = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 
     if connect:
@@ -97,7 +137,13 @@ def create_acpi_socket(connect=True):
     return result
 
 
-def check_for_powerbutton(acpi_socket, timeout=0.1):
+def get_powerbutton_pressed(acpi_socket, timeout=0.1):
+    """
+    Determines if powerbutton was pressed
+    :param acpi_socket: an connected, listening acpi socket
+    :param timeout: timeout for socket select
+    :return: boolean
+    """
     ready, _, __ = select.select([acpi_socket], [], [], timeout)
 
     if ready:
@@ -109,30 +155,35 @@ def check_for_powerbutton(acpi_socket, timeout=0.1):
     return False
 
 
-def poll_screen_change(last_result, skip=5):
-    if last_result is None:
-        return {'changed': False,
-                'count': 0,
-                'mode': xrandr_current()}
+def get_gui_initial(settings):
+    """
+    Returns initial GUI-state: True if not waked up for record, otherwise false
+    :param settings: a settings dictionary
+    :return: boolean
+    """
+    if not settings['use_tvheadend']:
+        return True
 
-    last_result['count'] += 1
-    last_result['changed'] = False
-
-    if last_result['count'] >= skip:
-        last_result['count'] = 0
-        new_setting = xrandr_current()
-
-        width_changed = last_result['mode']['width'] != new_setting['width']
-        height_changed = last_result['mode']['height'] != new_setting['height']
-
-        last_result['changed'] = width_changed or height_changed
-        last_result['mode'] = new_setting
-
-    return last_result
+    from tvhc import tvhclib
+    return not tvhclib.get_wakedup(settings['wake_persistent'])
 
 
-def get_record_pending(client, pending_time=30):
-    active_records = list(tvhclib.get_active_records(client))
+def get_record_pending(settings, client=None):
+    """
+    Returns True if a record is currently running or pending
+    :param settings: a settings dictionary
+    :param client: a tvhc-client
+    :return: boolean
+    """
+    if not settings['use_tvheadend']:
+        return False
+
+    from tvhc import HtspClient, tvhclib
+    if client is None:
+        with HtspClient() as client:
+            active_records = list(tvhclib.get_active_records(client))
+    else:
+        active_records = list(tvhclib.get_active_records(client))
 
     if active_records:
         return True
@@ -140,175 +191,190 @@ def get_record_pending(client, pending_time=30):
     next_record = tvhclib.get_next_record(client)
     if next_record is not None:
         time_to_next = next_record['start'] - time.time()
-        return (time_to_next / 60.0) < pending_time
-
-    return False
+        return time_to_next < settings['rec_bridge']
 
 
-def kill_process_recursive(pid):
-    parent = psutil.Process(pid)
+class HtpcGui(object):
+    """
+    htcp gui controller class
+    """
 
-    for child in parent.children(recursive=True):
-        child.kill()
+    def __init__(self):
+        """
+        initializes a new instance of HtpcGui
+        :return: HtpcGui
+        """
+        logging.debug('HtcpGui initialized')
+        self.settings = {}
+        self.acpi_socket = create_acpi_socket()
+        self.screen_resolution = xrandr_resolution(xrandr_current())
+        self.gui_needed = False
+        self.gui_process = None
+        self.recording = False
+        self.last_record_check = 0
 
-    parent.kill()
+    def load_settings(self):
+        """
+        load settings for instance
+        :return: void
+        """
+        cp = configparser.ConfigParser()
+        cp.read(['/etc/htpc/htpcgui.conf'])
+        self.settings = {'wake_persistent': cp.get('Paths', 'wake_persistent'),
+                         'gui_load': cp.get('Commands', 'gui_load'),
+                         'gui_stop': cp.get('Commands', 'gui_stop'),
+                         'shutdown': cp.get('Commands', 'shutdown'),
+                         'rec_bridge': int(cp.get('Times', 'rec_bridge')),
+                         'xrandr_wait': int(cp.get('Times', 'xrandr_wait')),
+                         'rec_checking': int(cp.get('Times', 'rec_checking')),
+                         'check_resolution': cp.get('Options', 'check_resolution') == 'yes',
+                         'use_tvheadend': cp.get('Options', 'use_tvheadend') == 'yes'}
 
+    def power_button_pressed(self):
+        """
+        determines if power button was pressed
+        :return: boolean
+        """
+        if self.acpi_socket is None:
+            return False
+        else:
+            return get_powerbutton_pressed(self.acpi_socket)
 
-def setup_logging():
-    logfile = os.path.join(os.path.expanduser('~'), 'htpcgui.log')
-    logging.basicConfig(
-        filename=logfile,
-        filemode='w',
-        level=logging.DEBUG,
-        format='%(asctime)s.%(msecs)d %(levelname)s %(module)s - %(funcName)s: %(message)s',
-        datefmt="%Y-%m-%d %H:%M:%S")
+    def screen_resolution_changed(self):
+        """
+        determines if screen resolution has changed
+        :return: boolean
+        """
+        new_resolution = xrandr_resolution(xrandr_current())
+        if new_resolution != self.screen_resolution:
+            self.screen_resolution = new_resolution
+            return True
+        else:
+            return False
 
+    def run(self):
+        """
+        starts main watchdog loop
+        :return: void
+        """
+        logging.debug('Entering main loop.')
+        self.gui_needed = get_gui_initial(self.settings)
+        while self.gui_needed or self.recording:
+            # just a moment...
+            time.sleep(1)
 
-def activate_preferred_screen_mode():
-    p_mode = xrandr_preferred()
-    if p_mode is not None:
-        cmd = 'xrandr -s %sx%s' % (p_mode['width'], p_mode['height'])
-        logging.info('activating preferred screen mode: %s' % cmd)
+            # power button pressed?
+            if self.power_button_pressed():
+                logging.debug('power button pressed.')
+                self.gui_needed = not self.gui_needed
+
+            # screen resolution changed?
+            if self.screen_resolution_changed() and self.settings['check_resolution']:
+                logging.debug('resolution has changed - try to restore.')
+                self.activate_preferred_resolution()
+                pass
+
+            # setup gui
+            if self.gui_needed and not self.get_gui_running():
+                self.start_gui()
+                pass
+
+            if self.get_gui_running() and not self.gui_needed:
+                self.stop_gui()
+                pass
+
+            # check for records pending, if no gui
+            if not self.gui_needed and not self.get_gui_running():
+                time_diff = time.time() - self.last_record_check
+                if time_diff > self.settings['rec_checking']:
+                    self.last_record_check = time.time()
+                    self.recording = get_record_pending(self.settings)
+                    logging.debug('check for pending records: %s' % self.recording)
+
+        logging.debug('htpc gui main loop finished.')
+
+    def activate_preferred_resolution(self):
+        """
+        stops gui, activates the preferred resolutions, and restarts gui
+        :return: void
+        """
+        has_stopped = False
+        if self.get_gui_running():
+            has_stopped = True
+            self.stop_gui()
+
+        time.sleep(self.settings['xrandr_wait'])
+        preferred_resolution = xrandr_resolution(xrandr_preferred())
+        cmd = 'xrandr -s %s' % preferred_resolution
         shell_execute(cmd)
-    else:
-        logging.info('no preferred mode found')
+        time.sleep(self.settings['xrandr_wait'])
 
+        if has_stopped:
+            self.start_gui()
 
-def gui_stop(gui_stop_command, gui_process):
-    if gui_process is not None:
-        try:
-            logging.info('Stopping GUI via kill-signal')
-            kill_process_recursive(gui_process.pid)
-            gui_process = None
-            logging.info('GUI and child processes stopped.')
-        except:
-            logging.info('Stopping GUI via command "%s"' % gui_stop_command)
-            shell_execute(gui_stop_command)
-    elif gui_stop_command:
-        logging.info('Stopping GUI via command "%s"' % gui_stop_command)
-        shell_execute(gui_stop_command)
-    else:
-        logging.debug('could not stop GUI process - there is none??')
+        self.screen_resolution = xrandr_resolution(xrandr_current())
+        logging.debug('screen resolution was set to %s' % self.screen_resolution)
 
-    return gui_process
+    def start_gui(self):
+        """
+        starts the gui
+        :return: void
+        """
+        logging.debug('starting GUI...')
+        cmd = self.settings['gui_load']
+        self.gui_process = Popen(cmd, shell=True, stdout=PIPE)
+        if self.get_gui_running():
+            logging.debug('GUI started with command "%s"', cmd)
+            logging.debug('GUI running now with PID %s' % self.gui_process.pid)
+        else:
+            logging.exception('Could not start GUI.')
 
+    def stop_gui(self):
+        """
+        stops the gui
+        :return: void
+        """
+        if self.gui_process is not None:
+            try:
+                kill_process_recursive(self.gui_process.pid)
+                self.gui_process = None
+            finally:
+                pass
 
-def gui_start(gui_load_command):
-    logging.info('Start GUI via command "%s"' % gui_load_command)
-    gui_process = Popen(gui_load_command, shell=True, stdout=PIPE)
-    logging.info('GUI running with PID %s' % gui_process.pid)
-    return gui_process
+        if self.get_gui_running() and self.settings['gui_stop']:
+            shell_execute(self.settings['gui_stop'])
+            self.gui_process = None
 
+    def get_gui_running(self):
+        """
+        returns gui running state
+        :return: boolean
+        """
+        if self.gui_process is None:
+            return False
+        elif self.gui_process.poll() is not None:
+            return False
+        else:
+            return True
 
-def mainloop(client):
-
-    # load settings
-    config = configparser.ConfigParser()
-    config.read(['/etc/htpc/htpcgui.conf'])
-
-    logging.info('Loading config')
-    try:
-        WAKE_PERSISTENT_FILE = config.get('Paths', 'wake_persistent')
-        CMD_GUI_LOAD = config.get('Commands', 'gui_load')
-        CMD_GUI_STOP = config.get('Commands', 'gui_stop')
-        CMD_SHUTDOWN = config.get('Commands', 'shutdown')
-        TIME_RECBRIDGE = int(config.get('Times', 'rec_bridge'))
-    except Exception as config_error:
-        logging.error('Could not load configuration. Please provide /etc/htpc/htpcgui.conf.')
-        logging.error('%s' % config_error)
-        sys.exit()
-
-    # check if started for record mode
-    logging.info('Initialize... ')
-    shutdown = False
-    gui_process = None
-    gui_running = False
-    gui_needed = not tvhclib.get_wakedup(WAKE_PERSISTENT_FILE)
-    screen_state = None
-
-    initial_mode = "GUI" if gui_needed else "RECORD"
-    logging.info('Starting with initial mode: %s' % initial_mode)
-
-    # create acpi socket for power button detection
-    acpi_socket = create_acpi_socket()
-
-    # enter main loop
-    while 1:
-        # power button pressed? change mode, or shutdown.
-        if check_for_powerbutton(acpi_socket):
-            logging.info('Got PBTN event')
-
-            # toggle gui mode
-            gui_needed = not gui_needed
-            logging.info('GUI needed is now: %s' % gui_needed)
-
-            # record active or pending?
-            record_pending = get_record_pending(client, TIME_RECBRIDGE)
-            logging.info('Record active or pending: %s' % record_pending)
-
-            # decide if shutdown is allowed....
-            shutdown = not gui_needed and not record_pending
-
-        # poll screen state
-        screen_state = poll_screen_change(screen_state)
-        if screen_state['changed']:
-            logging.info('Screen resolution has changed...')
-            gui_stop(CMD_GUI_STOP, gui_process)
-            time.sleep(1)
-            activate_preferred_screen_mode()
-            time.sleep(1)
-            screen_state = poll_screen_change(screen_state, 0)
-            time.sleep(1)
-            gui_stop(CMD_GUI_STOP, gui_process)
-
-        # start gui, if watch mode
-        if gui_needed and not gui_running:
-            gui_process = gui_start(CMD_GUI_LOAD)
-            gui_running = True
-
-        # stop gui, if not needed anymore
-        if gui_running and not gui_needed:
-            gui_process = gui_stop(CMD_GUI_STOP, gui_process)
-            gui_running = False
-
-        # gui exited?
-        if gui_process is not None and gui_process.poll() is not None:
-            gui_running = False
-
-        # shutdown?
-        if shutdown:
-            logging.info('Shutdown now via command "%s"' % CMD_SHUTDOWN)
-            shell_execute(CMD_SHUTDOWN)
-            break
-
-        # just wait a moment...
-        time.sleep(2)
+    def shutdown_computer(self):
+        """
+        shutdown the computer via settings command
+        :return: void
+        """
+        cmd = self.settings['shutdown']
+        if cmd:
+            logging.debug('shutdown with command "%s"' % cmd)
+            shell_execute(cmd)
+        else:
+            logging.debug('no shutdown command defined.')
 
 if __name__ == '__main__':
-
-    # start logging, say hello
     setup_logging()
-    logging.info('*** Starting HTPC UI Controller ***')
-
-    # connect client
-    with HtspClient() as client:
-
-        try:
-            success = False
-            max_tvh_tries = 5
-            for i in range(max_tvh_tries):
-                logging.info("connect to tvheadend...")
-                if client.try_open('localhost', 9982):
-                    success = True
-                    logging.info("Enter main loop")
-                    mainloop(client)
-                    break
-                else:
-                    logging.warning('Could not connect to tvheadend... (%s of %s)' % (i+1, max_tvh_tries))
-                    time.sleep(5)
-
-            if not success:
-                logging.error('Could not connect to tvheadend after %s tries! Giving up.' % max_tvh_tries)
-
-        except Exception as run_error:
-            logging.error('Unexpected error: %s' % run_error)
+    htpcgui = HtpcGui()
+    try:
+        htpcgui.load_settings()
+        htpcgui.run()
+        htpcgui.shutdown_computer()
+    except Exception as run_error:
+        logging.error('Unexpected error: %s' % run_error)
