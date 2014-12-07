@@ -152,6 +152,20 @@ def get_gui_initial(settings):
     return not tvhclib.get_wakedup(settings['wake_persistent'])
 
 
+def get_open_htsp_client():
+    from tvhc import HtspClient
+    result = HtspClient()
+
+    for i in range(5):
+        if result.try_open('localhost', 9982):
+            return result
+
+        time.sleep(2)
+
+    logging.error('Could not connect to tvheadend. Giving up after 5 tries.')
+    return result
+
+
 def get_record_pending(settings, client=None):
     """
     Returns True if a record is currently running or pending
@@ -165,7 +179,7 @@ def get_record_pending(settings, client=None):
     from tvhc import HtspClient, tvhclib
 
     if client is None:
-        with HtspClient() as client:
+        with get_open_htsp_client() as client:
             active_records = list(tvhclib.get_active_records(client))
     else:
         active_records = list(tvhclib.get_active_records(client))
