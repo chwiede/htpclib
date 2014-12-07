@@ -7,6 +7,7 @@ import select
 import socket
 import time
 import psutil
+import sys
 from subprocess import Popen, PIPE
 
 
@@ -51,7 +52,7 @@ def xrandr_query():
     Returns all current available screen resolutions and refresh rate modes as a dictionary.
     This method only works with installs X11.
     """
-    pattern_screens = r'(\w+)\s+connected\s+(primary|)?.+\n(\s+[x*+.\d\s]+\n)'
+    pattern_screens = r'([\w-]+)\s+connected\s+(primary|)?.+\n(\s+[x*+.\d\s]+\n)'
     pattern_mode = r'^\s+(\d+)x(\d+)\s+([\d.]+)([ *+]{0,2})'
 
     # xrandr query command
@@ -63,47 +64,29 @@ def xrandr_query():
 
     # iter screens, find resolutions
     for screen in screens:
-        modes = []
         for modeline in screen[2].split('\n'):
             match = re.match(pattern_mode, modeline)
             if match:
-                modes.append({'width': match.group(1),
-                              'height': match.group(2),
-                              'rate': match.group(3),
-                              'active': '*' in match.group(4),
-                              'preferred': '+' in match.group(4)})
-
-        item = {'name': screen[0],
-                'primary': screen[1] == 'primary',
-                'modes': modes}
-
-        yield item
-
+                yield {'width': match.group(1),
+                       'height': match.group(2),
+                       'port': screen[0],
+                       'rate': match.group(3),
+                       'active': '*' in match.group(4),
+                       'preferred': '+' in match.group(4)}
 
 def xrandr_current():
     """
     Gets the current xrandr setting
     :return: dictionary with xrandr setting
     """
-    for screen in xrandr_query():
+    modes = list(xrandr_query())
 
-        if not screen['primary']:
-            continue
-
-        for mode in screen['modes']:
+    if modes:
+        for mode in modes:
             if mode['active']:
                 return mode
 
     return None
-
-
-def xrandr_resolution(mode):
-    """
-    Gets the resolution of a xrandr mode (i.e.: "1920x1080")
-    :param mode: a xrandr mode dictionary
-    :return: string
-    """
-    return '%sx%s' % (mode['width'], mode['height'])
 
 
 def xrandr_preferred():
@@ -111,14 +94,14 @@ def xrandr_preferred():
     Gets the preferred xrandr ode
     :return: dictionary with xrandr setting
     """
-    for screen in xrandr_query():
+    modes = list(xrandr_query())
 
-        if not screen['primary']:
-            continue
-
-        for mode in screen['modes']:
+    if modes:
+        for mode in xrandr_query():
             if mode['preferred']:
                 return mode
+
+        return modes[0]
 
     return None
 
@@ -165,6 +148,7 @@ def get_gui_initial(settings):
         return True
 
     from tvhc import tvhclib
+
     return not tvhclib.get_wakedup(settings['wake_persistent'])
 
 
@@ -179,6 +163,7 @@ def get_record_pending(settings, client=None):
         return False
 
     from tvhc import HtspClient, tvhclib
+
     if client is None:
         with HtspClient() as client:
             active_records = list(tvhclib.get_active_records(client))
@@ -194,6 +179,25 @@ def get_record_pending(settings, client=None):
         return time_to_next < settings['rec_bridge']
 
 
+def get_screen_mode(mode):
+    if mode is None:
+        return {'port': 'None',
+                'resolution': '0x0'}
+
+    return {'port': mode['port'],
+            'resolution': '%sx%s' % (mode['width'], mode['height'])}
+
+
+def current_screen_mode():
+    mode = xrandr_current()
+
+    if mode is None:
+        mode = xrandr_preferred()
+
+    return get_screen_mode(mode)
+
+
+
 class HtpcGui(object):
     """
     htcp gui controller class
@@ -207,11 +211,12 @@ class HtpcGui(object):
         logging.debug('HtcpGui initialized')
         self.settings = {}
         self.acpi_socket = create_acpi_socket()
-        self.screen_resolution = xrandr_resolution(xrandr_current())
+        self.screen_mode = current_screen_mode()
         self.gui_needed = False
         self.gui_process = None
         self.recording = False
         self.last_record_check = 0
+        self.last_screen_check = 0
 
     def load_settings(self):
         """
@@ -245,9 +250,15 @@ class HtpcGui(object):
         determines if screen resolution has changed
         :return: boolean
         """
-        new_resolution = xrandr_resolution(xrandr_current())
-        if new_resolution != self.screen_resolution:
-            self.screen_resolution = new_resolution
+
+        # leave for short time
+        if time.time() - self.last_screen_check < 10:
+            return False
+
+        self.last_screen_check = time.time()
+        new_mode = current_screen_mode()
+        if new_mode != self.screen_mode:
+            self.screen_mode = new_mode
             return True
         else:
             return False
@@ -270,7 +281,7 @@ class HtpcGui(object):
 
             # screen resolution changed?
             if self.screen_resolution_changed() and self.settings['check_resolution']:
-                logging.debug('resolution has changed - try to restore.')
+                logging.debug('resolution has changed - try to set preferred one...')
                 self.activate_preferred_resolution()
                 pass
 
@@ -298,22 +309,30 @@ class HtpcGui(object):
         stops gui, activates the preferred resolutions, and restarts gui
         :return: void
         """
+
+        mode = xrandr_preferred()
+        if mode is None:
+            logging.warning('Could not get preferred screen mode!')
+            return
+
+        preferred = get_screen_mode(mode)
+
         has_stopped = False
         if self.get_gui_running():
             has_stopped = True
             self.stop_gui()
 
         time.sleep(self.settings['xrandr_wait'])
-        preferred_resolution = xrandr_resolution(xrandr_preferred())
-        cmd = 'xrandr -s %s' % preferred_resolution
+        cmd = 'xrandr --output %s -s %s' % (preferred['port'], preferred['resolution'])
         shell_execute(cmd)
         time.sleep(self.settings['xrandr_wait'])
 
         if has_stopped:
             self.start_gui()
 
-        self.screen_resolution = xrandr_resolution(xrandr_current())
-        logging.debug('screen resolution was set to %s' % self.screen_resolution)
+        self.screen_mode = current_screen_mode()
+        logging.debug('screen was set to %s on %s' % (self.screen_mode['resolution'],
+                                                      self.screen_mode['port']))
 
     def start_gui(self):
         """
@@ -369,12 +388,16 @@ class HtpcGui(object):
         else:
             logging.debug('no shutdown command defined.')
 
+
 if __name__ == '__main__':
     setup_logging()
+
     htpcgui = HtpcGui()
     try:
         htpcgui.load_settings()
         htpcgui.run()
         htpcgui.shutdown_computer()
-    except Exception as run_error:
-        logging.error('Unexpected error: %s' % run_error)
+    except:
+        print("Unexpected error:", sys.exc_info()[0])
+        logging.error("Unexpected error:", sys.exc_info()[0])
+        raise
