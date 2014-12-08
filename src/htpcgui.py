@@ -148,12 +148,16 @@ def get_gui_initial(settings):
     :param settings: a settings dictionary
     :return: boolean
     """
+    logging.debug('try to determine wake up reason')
     if not settings['use_tvheadend']:
+        logging.debug('use_tvheadend: False => manually started')
         return True
 
     from tvhc import tvhclib
-
-    return not tvhclib.get_wakedup(settings['wake_persistent'])
+    logging.debug('reading timestamp file %s' % settings['wake_persistent'])
+    waked_by_rtc, timestamp, boot_time = tvhclib.get_wakedup(settings['wake_persistent'], detail=True)
+    logging.debug('waked by rtc: %s (timestamp: %s, boot-time: %s)' % (waked_by_rtc, timestamp, boot_time))
+    return not waked_by_rtc
 
 
 def get_open_htsp_client():
