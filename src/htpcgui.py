@@ -174,7 +174,7 @@ def get_open_htsp_client():
     return result
 
 
-def get_record_pending(settings, client=None):
+def get_record_pending(settings):
     """
     Returns True if a record is currently running or pending
     :param settings: a settings dictionary
@@ -184,24 +184,20 @@ def get_record_pending(settings, client=None):
     if not settings['use_tvheadend']:
         return False
 
-    from tvhc import HtspClient, tvhclib
+    from tvhc import tvhclib
 
-    if client is None:
-        with get_open_htsp_client() as client:
-            active_records = list(tvhclib.get_active_records(client))
-            next_record = tvhclib.get_next_record(client)
-    else:
+    with get_open_htsp_client() as client:
         active_records = list(tvhclib.get_active_records(client))
         next_record = tvhclib.get_next_record(client)
 
-    if active_records:
-        logging.debug('active records found.')
-        return True
+        if active_records:
+            logging.debug('active records found.')
+            return True
 
-    if next_record is not None:
-        logging.debug('next record starting at %s, time is %s' % (next_record['start'], time.time()))
-        time_to_next = next_record['start'] - time.time()
-        return time_to_next < settings['rec_bridge']
+        if next_record is not None:
+            logging.debug('next record starting at %s, time is %s' % (next_record['start'], time.time()))
+            time_to_next = next_record['start'] - time.time()
+            return time_to_next < settings['rec_bridge']
 
     return False
 
